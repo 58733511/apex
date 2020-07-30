@@ -57,6 +57,7 @@ class SyncBatchnormFunction(Function):
             running_mean.data = running_mean.data * (1-momentum) + momentum*r_m_inc
             running_variance.data = running_variance.data * (1-momentum) + momentum*r_v_inc
         else:
+            count_all = torch.cuda.IntTensor(world_size, device=device)
             mean = running_mean.data
             inv_std = 1.0 / torch.sqrt(running_variance.data + eps)
 
