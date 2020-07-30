@@ -17,49 +17,44 @@ class SyncBatchnormFunction(Function):
         var = None
         out = None
         count = None
-        if track_running_stats:
-            if channel_last:
-                count = int(input.numel()/input.size(-1))
-                mean, var_biased = syncbn.welford_mean_var_c_last(input)
-            else:
-                count = int(input.numel()/input.size(1))
-                mean, var_biased = syncbn.welford_mean_var(input)
-
-            if torch.distributed.is_initialized():
-                if not process_group:
-                    process_group = torch.distributed.group.WORLD
-                device = mean.device
-                world_size = torch.distributed.get_world_size(process_group)
-                mean_all = torch.empty(world_size, mean.size(0), dtype=mean.dtype, device=device)
-                var_all = torch.empty(world_size, var_biased.size(0), dtype=var_biased.dtype, device=device)
-                count_all = torch.cuda.IntTensor(world_size, device=device)
-                mean_l = [mean_all.narrow(0, i, 1) for i in range(world_size)]
-                var_l = [var_all.narrow(0, i, 1) for i in range(world_size)]
-                count_l = [count_all.narrow(0, i, 1) for i in range(world_size)]
-                torch.distributed.all_gather(mean_l, mean, process_group)
-                torch.distributed.all_gather(var_l, var_biased, process_group)
-                torch.distributed.all_gather(
-                      count_l,
-                      torch.cuda.IntTensor([count], device=device),
-                      process_group)
-                mean, var, inv_std = syncbn.welford_parallel(mean_all, var_all, count_all, eps)
-            else:
-                device = mean.device
-                count_all = torch.cuda.IntTensor([count], device=device)
-                inv_std = 1.0 / torch.sqrt(var_biased + eps)
-                var = var_biased * (count) / (count-1) 
-
-            if count == 1 and world_size < 2:
-                raise ValueError('Expected more than 1 value per channel when training, got input size{}'.format(input.size()))
-
-            r_m_inc = mean if running_mean.dtype != torch.float16 else mean.half()
-            r_v_inc = var if running_variance.dtype != torch.float16 else var.half()
-            running_mean.data = running_mean.data * (1-momentum) + momentum*r_m_inc
-            running_variance.data = running_variance.data * (1-momentum) + momentum*r_v_inc
+        if channel_last:
+            count = int(input.numel()/input.size(-1))
+            mean, var_biased = syncbn.welford_mean_var_c_last(input)
         else:
+            count = int(input.numel()/input.size(1))
+            mean, var_biased = syncbn.welford_mean_var(input)
+
+        if torch.distributed.is_initialized():
+            if not process_group:
+                process_group = torch.distributed.group.WORLD
+            device = mean.device
+            world_size = torch.distributed.get_world_size(process_group)
+            mean_all = torch.empty(world_size, mean.size(0), dtype=mean.dtype, device=device)
+            var_all = torch.empty(world_size, var_biased.size(0), dtype=var_biased.dtype, device=device)
             count_all = torch.cuda.IntTensor(world_size, device=device)
-            mean = running_mean.data
-            inv_std = 1.0 / torch.sqrt(running_variance.data + eps)
+            mean_l = [mean_all.narrow(0, i, 1) for i in range(world_size)]
+            var_l = [var_all.narrow(0, i, 1) for i in range(world_size)]
+            count_l = [count_all.narrow(0, i, 1) for i in range(world_size)]
+            torch.distributed.all_gather(mean_l, mean, process_group)
+            torch.distributed.all_gather(var_l, var_biased, process_group)
+            torch.distributed.all_gather(
+                  count_l,
+                  torch.cuda.IntTensor([count], device=device),
+                  process_group)
+            mean, var, inv_std = syncbn.welford_parallel(mean_all, var_all, count_all, eps)
+        else:
+            device = mean.device
+            count_all = torch.cuda.IntTensor([count], device=device)
+            inv_std = 1.0 / torch.sqrt(var_biased + eps)
+            var = var_biased * (count) / (count-1) 
+
+        if count == 1 and world_size < 2:
+            raise ValueError('Expected more than 1 value per channel when training, got input size{}'.format(input.size()))
+
+        r_m_inc = mean if running_mean.dtype != torch.float16 else mean.half()
+        r_v_inc = var if running_variance.dtype != torch.float16 else var.half()
+        running_mean.data = running_mean.data * (1-momentum) + momentum*r_m_inc
+        running_variance.data = running_variance.data * (1-momentum) + momentum*r_v_inc
 
         ctx.save_for_backward(input, weight, mean, inv_std, z, bias, count_all)
         ctx.process_group = process_group
